@@ -1,0 +1,53 @@
+name: Job Trackr Security Audit
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - "backend/package.json"
+      - "backend/package-lock.json"
+
+  pull_request:
+    branches: [master]
+    paths:
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - "backend/package.json"
+      - "backend/package-lock.json"
+
+  schedule:
+    - cron: "0 8 * * 1"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.project }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [frontend, backend]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.project }}
+        run: npm ci
+
+      - name: Run security audit
+        working-directory: ${{ matrix.project }}
+        run: npm audit --audit-level=high
