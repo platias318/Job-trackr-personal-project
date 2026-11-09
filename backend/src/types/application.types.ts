@@ -1,4 +1,4 @@
-export const MAX_APPLICATIONS = 15;
+export const MAX_APPLICATIONS = 20;
 
 export const APPLICATION_STATUSES = [
   "Applied",
