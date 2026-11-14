@@ -4,6 +4,11 @@ Job Trackr is a personal project and a free fullstack web application hosted wit
 
 Live at: https://www.jobtrackrproject.work
 
+For more detailed documentation:
+
+- See the [Frontend README](./frontend/README.md)
+- See the [Backend README](./backend/README.md)
+
 ## Overview
 
 When you're job hunting it's easy to lose track of where you've applied, what stage you're at, and what's coming up. Job Trackr solves that by giving you a clean dashboard to log and monitor all your applications in one place. It provides you with:
@@ -50,13 +55,6 @@ No passwords are stored. Authentication is handled securely using session-based 
 ### Deployment
 
 - Hosted on Vercel
-
----
-
-For more detailed documentation:
-
-- See the [Frontend README](./frontend/README.md)
-- See the [Backend README](./backend/README.md)
 
 ---
 
