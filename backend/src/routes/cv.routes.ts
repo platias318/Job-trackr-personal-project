@@ -1,5 +1,5 @@
 import { del, put } from "@vercel/blob";
-import { Request, Response, Router } from "express";
+import { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 
 import { isAuthenticated } from "../middleware/authMiddleware.js";
@@ -7,26 +7,64 @@ import {
   createCV,
   CVLimitError,
   deleteCV,
+  getCVCount,
   getCVsByUser,
   updateCV,
 } from "../services/cv.service.js";
-import { CreateCVPayload, UpdateCVPayload } from "../types/cv.types.js";
+import {
+  CreateCVPayload,
+  MAX_CVS,
+  UpdateCVPayload,
+} from "../types/cv.types.js";
 import { User } from "../types/user.types.js";
 import { parseBoolean } from "../utils/parseBoolean.js";
+import { parseId } from "../utils/parseId.js";
+import { buildCvBlobPath, isPdfBuffer } from "../utils/pdf.js";
 
 const router = Router();
 
+const MAX_CV_SIZE_BYTES = 1 * 1024 * 1024; // 1MB
+const PDF_ONLY_MESSAGE = "Only PDF files are allowed";
+
 const upload = multer({
   storage: multer.memoryStorage(), // keep file in memory as a Buffer
-  limits: { fileSize: 1 * 1024 * 1024 }, // 1MB max
+  limits: { fileSize: MAX_CV_SIZE_BYTES },
   fileFilter: (_, file, cb) => {
     if (file.mimetype === "application/pdf") {
       cb(null, true);
     } else {
-      cb(new Error("Only PDF files are allowed"));
+      cb(new Error(PDF_ONLY_MESSAGE));
     }
   },
 });
+
+// Wraps multer so upload problems become clear 400 JSON responses instead of
+// falling through to Express's default 500 HTML error page.
+const uploadCvFile = (req: Request, res: Response, next: NextFunction) => {
+  upload.single("file")(req, res, (err: unknown) => {
+    if (!err) {
+      next();
+      return;
+    }
+
+    if (err instanceof multer.MulterError) {
+      res.status(400).json({
+        error:
+          err.code === "LIMIT_FILE_SIZE"
+            ? "The PDF must be smaller than 1 MB"
+            : "Invalid file upload",
+      });
+      return;
+    }
+
+    if (err instanceof Error && err.message === PDF_ONLY_MESSAGE) {
+      res.status(400).json({ error: PDF_ONLY_MESSAGE });
+      return;
+    }
+
+    next(err);
+  });
+};
 
 router.use(isAuthenticated);
 
@@ -42,7 +80,7 @@ router.get("/", async (req: Request, res: Response): Promise<void> => {
 
 router.post(
   "/",
-  upload.single("file"), // "file" matches the FormData field name on the frontend
+  uploadCvFile, // "file" matches the FormData field name on the frontend
   async (req: Request, res: Response): Promise<void> => {
     const user = req.user as User;
     const { name, version_label, notes, is_default } =
@@ -56,27 +94,47 @@ router.post(
       res.status(400).json({ error: "A PDF file is required" });
       return;
     }
+    if (!isPdfBuffer(req.file.buffer)) {
+      res.status(400).json({ error: PDF_ONLY_MESSAGE });
+      return;
+    }
 
     try {
+      // Cheap early exit so we do not upload a file we are about to reject.
+      // createCV re-checks this authoritatively inside a transaction.
+      if ((await getCVCount(user.id)) >= MAX_CVS) {
+        throw new CVLimitError();
+      }
+
       const blob = await put(
-        `cvs/${user.id}/${Date.now()}-${req.file.originalname}`,
+        buildCvBlobPath(req.file.originalname),
         req.file.buffer,
         {
           access: "public", // must match your Vercel Blob store access setting
           token: process.env.BLOB_READ_WRITE_TOKEN,
           contentType: "application/pdf",
+          addRandomSuffix: false, // the path already contains a random UUID
         },
       );
 
-      const cv = await createCV(user.id, {
-        name: name.trim(),
-        version_label: version_label?.trim() || null,
-        notes: notes?.trim() || null,
-        is_default: parseBoolean(is_default),
-        file_url: blob.url,
-      });
+      try {
+        const cv = await createCV(user.id, {
+          name: name.trim(),
+          version_label: version_label?.trim() || null,
+          notes: notes?.trim() || null,
+          is_default: parseBoolean(is_default),
+          file_url: blob.url,
+        });
 
-      res.status(201).json({ cv });
+        res.status(201).json({ cv });
+      } catch (err) {
+        // The database rejected the CV (for example the limit was hit by a
+        // parallel request): don't leave the uploaded file behind.
+        await del(blob.url, { token: process.env.BLOB_READ_WRITE_TOKEN }).catch(
+          () => undefined,
+        );
+        throw err;
+      }
     } catch (err) {
       if (err instanceof CVLimitError) {
         res.status(400).json({ error: err.message });
@@ -89,8 +147,8 @@ router.post(
 
 router.put("/:id", async (req: Request, res: Response): Promise<void> => {
   const user = req.user as User;
-  const id = parseInt(req.params.id as string);
-  if (isNaN(id)) {
+  const id = parseId(req.params.id as string);
+  if (!id) {
     res.status(400).json({ error: "Invalid id" });
     return;
   }
@@ -117,8 +175,8 @@ router.put("/:id", async (req: Request, res: Response): Promise<void> => {
 
 router.delete("/:id", async (req: Request, res: Response): Promise<void> => {
   const user = req.user as User;
-  const id = parseInt(req.params.id as string);
-  if (isNaN(id)) {
+  const id = parseId(req.params.id as string);
+  if (!id) {
     res.status(400).json({ error: "Invalid id" });
     return;
   }
