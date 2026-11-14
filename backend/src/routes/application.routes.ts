@@ -2,15 +2,14 @@ import { Request, Response, Router } from "express";
 
 import { isAuthenticated } from "../middleware/authMiddleware.js";
 import {
+  ApplicationLimitError,
   createApplication,
   deleteApplication,
-  getApplicationCount,
   getApplicationsByUser,
   updateApplication,
 } from "../services/application.service.js";
 import {
   CreateApplicationPayload,
-  MAX_APPLICATIONS,
   UpdateApplicationPayload,
 } from "../types/application.types.js";
 import { User } from "../types/user.types.js";
@@ -45,14 +44,6 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const count = await getApplicationCount(user.id);
-  if (count >= MAX_APPLICATIONS) {
-    res.status(400).json({
-      error: `You have reached the maximum of ${MAX_APPLICATIONS} applications`,
-    });
-    return;
-  }
-
   try {
     const application = await createApplication(user.id, {
       ...data,
@@ -62,7 +53,11 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
       follow_up_date: data.follow_up_date || null,
     });
     res.status(201).json({ application });
-  } catch {
+  } catch (err) {
+    if (err instanceof ApplicationLimitError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     res.status(500).json({ error: "Failed to create application" });
   }
 });

@@ -5,6 +5,7 @@ import multer from "multer";
 import { isAuthenticated } from "../middleware/authMiddleware.js";
 import {
   createCV,
+  CVLimitError,
   deleteCV,
   getCVsByUser,
   updateCV,
@@ -77,10 +78,8 @@ router.post(
 
       res.status(201).json({ cv });
     } catch (err) {
-      if (err instanceof Error && err.message === "CV_LIMIT_REACHED") {
-        res
-          .status(400)
-          .json({ error: "You have reached the maximum of 2 CVs" });
+      if (err instanceof CVLimitError) {
+        res.status(400).json({ error: err.message });
         return;
       }
       res.status(500).json({ error: "Failed to upload CV" });
