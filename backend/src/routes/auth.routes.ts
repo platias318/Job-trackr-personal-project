@@ -5,7 +5,11 @@ import passport from "../config/passport.js";
 import { isAuthenticated } from "../middleware/authMiddleware.js";
 import { User } from "../types/user.types.js";
 import { sendVerificationCode } from "../utils/email.js";
-import { signToken, verifyToken } from "../utils/jwt.js";
+import {
+  signExchangeToken,
+  signToken,
+  verifyExchangeToken,
+} from "../utils/jwt.js";
 import { generateCode } from "../utils/otp.js";
 
 const router = Router();
@@ -28,7 +32,8 @@ router.get(
   // Successful redirect
   (req: Request, res: Response) => {
     const user = req.user as User;
-    const code = signToken(user.id);
+    // Short-lived, exchange-only token (not a session token)
+    const code = signExchangeToken(user.id);
 
     res.redirect(`${process.env.FRONTEND_URL}/auth/callback?code=${code}`);
   },
@@ -140,7 +145,7 @@ router.get("/exchange", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const payload = verifyToken(code);
+    const payload = verifyExchangeToken(code);
 
     const { rows } = await pool.query(
       "SELECT id, email, name FROM users WHERE id = $1",
