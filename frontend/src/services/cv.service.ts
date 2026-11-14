@@ -1,8 +1,13 @@
+import axios from "axios";
+
 import type { CreateCVPayload, CV, UpdateCVPayload } from "@/types/cv.types";
 
 import api from "./api";
 
+// Prefer the message the API sent (for example "The PDF must be smaller than
+// 1 MB"); Axios' own message is only a generic "Request failed with status 400".
 const extractError = (err: unknown, fallback: string): string => {
+  if (axios.isAxiosError(err)) return err.response?.data?.error ?? fallback;
   if (err instanceof Error) return err.message;
   return fallback;
 };
