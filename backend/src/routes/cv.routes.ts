@@ -11,6 +11,7 @@ import {
 } from "../services/cv.service.js";
 import { CreateCVPayload, UpdateCVPayload } from "../types/cv.types.js";
 import { User } from "../types/user.types.js";
+import { parseBoolean } from "../utils/parseBoolean.js";
 
 const router = Router();
 
@@ -70,7 +71,7 @@ router.post(
         name: name.trim(),
         version_label: version_label?.trim() || null,
         notes: notes?.trim() || null,
-        is_default: is_default === true,
+        is_default: parseBoolean(is_default),
         file_url: blob.url,
       });
 
