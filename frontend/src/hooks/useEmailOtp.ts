@@ -1,4 +1,6 @@
+import axios from "axios";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import { updateUser } from "@/components/redux/common/commonSlice";
@@ -7,6 +9,8 @@ import { useAppDispatch } from "@/stores/hooks";
 import type { EmailStep } from "@/types/emailStep.types";
 
 export const useEmailOtp = () => {
+  const { t } = useTranslation();
+
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
 
@@ -25,8 +29,16 @@ export const useEmailOtp = () => {
     try {
       await authService.sendCode(email);
       setEmailStep("code");
-    } catch {
-      setError("Failed to send code. Please try again.");
+    } catch (err) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+
+      if (status === 429) {
+        setError(t("HomePage.errors.tooManyRequests"));
+      } else if (status === 400) {
+        setError(t("HomePage.errors.invalidEmail"));
+      } else {
+        setError(t("HomePage.errors.sendCodeFailed"));
+      }
     } finally {
       setIsLoading(false);
     }
@@ -44,7 +56,7 @@ export const useEmailOtp = () => {
       dispatch(updateUser(userData));
       navigate("/dashboard");
     } catch {
-      setError("Invalid or expired code. Please try again.");
+      setError(t("HomePage.errors.invalidOrExpiredCode"));
     } finally {
       setIsLoading(false);
     }

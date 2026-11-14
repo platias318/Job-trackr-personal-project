@@ -62,7 +62,11 @@ export const EmailCodeStep = ({
         disabled={isLoading || code.length !== 6}
         sx={emailOtpFormStyles.primaryButton}
       >
-        {isLoading ? <CircularProgress size={24} /> : "Verify email address"}
+        {isLoading ? (
+          <CircularProgress size={24} />
+        ) : (
+          t("HomePage.verifyEmailAddress")
+        )}
       </Button>
       <Button variant="text" fullWidth onClick={onReset}>
         {t("HomePage.useDifferentEmail")}

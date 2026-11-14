@@ -11,7 +11,13 @@
     "verifyEmailAddress": "Επαληθεύστε τη διεύθυνση email σας",
     "useDifferentEmail": "Χρησιμοποιήστε ένα διαφορετικό email",
     "emailAddress": "Διεύθυνση email",
-    "continueWithEmail": "Συνέχεια μέσω email"
+    "continueWithEmail": "Συνέχεια μέσω email",
+    "errors": {
+      "sendCodeFailed": "Η αποστολή του κωδικού απέτυχε. Δοκιμάστε ξανά.",
+      "tooManyRequests": "Περιμένετε ένα λεπτό πριν ζητήσετε νέο κωδικό.",
+      "invalidEmail": "Εισαγάγετε μια έγκυρη διεύθυνση email.",
+      "invalidOrExpiredCode": "Μη έγκυρος ή ληξοπρόθεσμος κωδικός. Δοκιμάστε ξανά."
+    }
   },
   "Navigation": {
     "logout": "Αποσύνδεση",
