@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { cvService } from "@/services/cv.service";
-import type { CreateCVPayload, CV, UpdateCVPayload } from "@/types/cv.types";
-
-const CV_LIMIT = 2;
+import {
+  type CreateCVPayload,
+  type CV,
+  MAX_CVS,
+  type UpdateCVPayload,
+} from "@/types/cv.types";
 
 export const useCVs = () => {
   const [cvs, setCVs] = useState<CV[]>([]);
@@ -50,8 +53,8 @@ export const useCVs = () => {
     create,
     update,
     remove,
-    atLimit: cvs.length >= CV_LIMIT,
+    atLimit: cvs.length >= MAX_CVS,
     count: cvs.length,
-    limit: CV_LIMIT,
+    limit: MAX_CVS,
   };
 };

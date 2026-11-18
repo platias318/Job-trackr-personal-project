@@ -5,8 +5,19 @@ import passport from "../config/passport.js";
 import { isAuthenticated } from "../middleware/authMiddleware.js";
 import { User } from "../types/user.types.js";
 import { sendVerificationCode } from "../utils/email.js";
-import { signToken, verifyToken } from "../utils/jwt.js";
-import { generateCode } from "../utils/otp.js";
+import {
+  signExchangeToken,
+  signToken,
+  verifyExchangeToken,
+} from "../utils/jwt.js";
+import {
+  codesMatch,
+  generateCode,
+  OTP_MAX_ATTEMPTS,
+  OTP_RESEND_COOLDOWN_SECONDS,
+  OTP_TTL_MINUTES,
+} from "../utils/otp.js";
+import { normalizeEmail } from "../utils/validateEmail.js";
 
 const router = Router();
 
@@ -28,7 +39,8 @@ router.get(
   // Successful redirect
   (req: Request, res: Response) => {
     const user = req.user as User;
-    const code = signToken(user.id);
+    // Short-lived, exchange-only token (not a session token)
+    const code = signExchangeToken(user.id);
 
     res.redirect(`${process.env.FRONTEND_URL}/auth/callback?code=${code}`);
   },
@@ -38,27 +50,54 @@ router.get(
 router.post(
   "/email/send-code",
   async (req: Request, res: Response): Promise<void> => {
-    const { email } = req.body;
+    const email = normalizeEmail(req.body?.email);
 
     if (!email) {
-      res.status(400).json({ error: "Email is required" });
+      res.status(400).json({ error: "A valid email is required" });
       return;
     }
 
     try {
       const code = generateCode();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-      await pool.query("DELETE FROM verification_codes WHERE email = $1", [
-        email,
-      ]);
+      // One active code per email. The upsert only replaces an existing code
+      // once the resend cooldown has passed (a code is "created" at
+      // expires_at - TTL), so this single statement both issues the code and
+      // rate-limits how often an address can be emailed.
+      const cooldownWindowSeconds =
+        OTP_TTL_MINUTES * 60 - OTP_RESEND_COOLDOWN_SECONDS;
 
-      await pool.query(
-        "INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)",
-        [email, code, expiresAt],
+      const { rowCount } = await pool.query(
+        `INSERT INTO verification_codes (email, code, expires_at, attempts)
+         VALUES ($1, $2, NOW() + make_interval(mins => $3::int), 0)
+         ON CONFLICT (email) DO UPDATE
+           SET code = EXCLUDED.code,
+               expires_at = EXCLUDED.expires_at,
+               attempts = 0
+           WHERE verification_codes.expires_at
+                 <= NOW() + make_interval(secs => $4::int)`,
+        [email, code, OTP_TTL_MINUTES, cooldownWindowSeconds],
       );
 
-      await sendVerificationCode(email, code);
+      if (!rowCount) {
+        res.set("Retry-After", String(OTP_RESEND_COOLDOWN_SECONDS));
+        res.status(429).json({
+          error: "Please wait a minute before requesting another code",
+        });
+        return;
+      }
+
+      try {
+        await sendVerificationCode(email, code);
+      } catch (err) {
+        // The email never went out: free the slot so the user can retry
+        // immediately instead of waiting out the cooldown.
+        await pool.query(
+          "DELETE FROM verification_codes WHERE email = $1 AND code = $2",
+          [email, code],
+        );
+        throw err;
+      }
 
       res.json({ message: "Code sent" });
     } catch (err) {
@@ -71,20 +110,29 @@ router.post(
 router.post(
   "/email/verify-code",
   async (req: Request, res: Response): Promise<void> => {
-    const { email, code } = req.body;
+    const email = normalizeEmail(req.body?.email);
+    const code =
+      typeof req.body?.code === "string" ? req.body.code.trim() : "";
 
-    if (!email || !code) {
-      res.status(400).json({ error: "Email and code are required" });
+    if (!email || !/^\d{6}$/.test(code)) {
+      res.status(400).json({ error: "Email and a 6-digit code are required" });
       return;
     }
 
     try {
+      // Every guess consumes an attempt *before* the code is compared, in a
+      // single atomic UPDATE. Parallel requests therefore cannot get more than
+      // OTP_MAX_ATTEMPTS guesses, and once the attempts are used up (or the
+      // code expired) no row comes back at all.
       const { rows } = await pool.query(
-        "SELECT * FROM verification_codes WHERE email = $1 AND code = $2 AND expires_at > NOW()",
-        [email, code],
+        `UPDATE verification_codes
+            SET attempts = attempts + 1
+          WHERE email = $1 AND expires_at > NOW() AND attempts < $2
+          RETURNING code`,
+        [email, OTP_MAX_ATTEMPTS],
       );
 
-      if (!rows[0]) {
+      if (!rows[0] || !codesMatch(rows[0].code, code)) {
         res.status(401).json({ error: "Invalid or expired code" });
         return;
       }
@@ -93,8 +141,9 @@ router.post(
         email,
       ]);
 
+      // LOWER() so accounts created before emails were normalised still match.
       const existingUser = await pool.query(
-        "SELECT * FROM users WHERE email = $1",
+        "SELECT * FROM users WHERE LOWER(email) = $1",
         [email],
       );
 
@@ -140,7 +189,7 @@ router.get("/exchange", async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const payload = verifyToken(code);
+    const payload = verifyExchangeToken(code);
 
     const { rows } = await pool.query(
       "SELECT id, email, name FROM users WHERE id = $1",

@@ -1,3 +1,5 @@
+export const MAX_CVS = 2;
+
 export interface CV {
   id: number;
   user_id: number;

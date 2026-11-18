@@ -1,9 +1,22 @@
-import { pool } from "../config/db.js";
+import {
+  lockUserResource,
+  pool,
+  USER_LOCK,
+  withTransaction,
+} from "../config/db.js";
 import {
   Application,
   CreateApplicationPayload,
+  MAX_APPLICATIONS,
   UpdateApplicationPayload,
 } from "../types/application.types.js";
+
+export class ApplicationLimitError extends Error {
+  constructor() {
+    super(`You have reached the maximum of ${MAX_APPLICATIONS} applications`);
+    this.name = "ApplicationLimitError";
+  }
+}
 
 export const getApplicationsByUser = async (
   userId: number,
@@ -15,28 +28,41 @@ export const getApplicationsByUser = async (
   return rows;
 };
 
-export const createApplication = async (
+// The limit check and the insert run in one transaction under a per-user lock,
+// so parallel requests cannot push a user past MAX_APPLICATIONS.
+export const createApplication = (
   userId: number,
   data: CreateApplicationPayload,
-): Promise<Application> => {
-  const { rows } = await pool.query(
-    `INSERT INTO applications (user_id, company_name, job_title, status, date_applied, job_link, linkedin_link, notes, follow_up_date)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING *`,
-    [
-      userId,
-      data.company_name,
-      data.job_title,
-      data.status,
-      data.date_applied,
-      data.job_link ?? null,
-      data.linkedin_link ?? null,
-      data.notes ?? null,
-      data.follow_up_date ?? null,
-    ],
-  );
-  return rows[0];
-};
+): Promise<Application> =>
+  withTransaction(async (client) => {
+    await lockUserResource(client, USER_LOCK.applications, userId);
+
+    const { rows: counted } = await client.query(
+      "SELECT COUNT(*)::int AS count FROM applications WHERE user_id = $1",
+      [userId],
+    );
+    if (counted[0].count >= MAX_APPLICATIONS) {
+      throw new ApplicationLimitError();
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO applications (user_id, company_name, job_title, status, date_applied, job_link, linkedin_link, notes, follow_up_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        userId,
+        data.company_name,
+        data.job_title,
+        data.status,
+        data.date_applied,
+        data.job_link ?? null,
+        data.linkedin_link ?? null,
+        data.notes ?? null,
+        data.follow_up_date ?? null,
+      ],
+    );
+    return rows[0];
+  });
 
 export const updateApplication = async (
   id: number,
@@ -85,12 +111,4 @@ export const deleteApplication = async (
     [id, userId],
   );
   return (rowCount ?? 0) > 0;
-};
-
-export const getApplicationCount = async (userId: number): Promise<number> => {
-  const { rows } = await pool.query(
-    "SELECT COUNT(*) FROM applications WHERE user_id = $1",
-    [userId],
-  );
-  return parseInt(rows[0].count);
 };

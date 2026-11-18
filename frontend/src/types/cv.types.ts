@@ -1,3 +1,6 @@
+// Keep in sync with MAX_CVS in backend/src/types/cv.types.ts
+export const MAX_CVS = 2;
+
 export interface CV {
   id: number;
   user_id: number;

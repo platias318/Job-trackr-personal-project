@@ -22,15 +22,15 @@ Built with **Node.js, Express 4 and TypeScript** (ESM), backed by **PostgreSQL o
 
 ## Tech stack
 
-| Concern | Choice |
-| --- | --- |
-| Runtime / framework | Node.js, Express 4, TypeScript 5 (`NodeNext` modules) |
-| Database | PostgreSQL (Neon) via `pg` connection pool, raw parameterised SQL |
-| Auth | Passport.js (`passport-google-oauth20`), JSON Web Tokens, HTTP-only cookie |
-| Email | Resend |
-| File storage | Vercel Blob (public store) |
-| Uploads | Multer (in-memory, 1 MB limit, PDF only) |
-| Tooling | `tsx` for dev, ESLint 9 + `simple-import-sort`, GitHub Actions |
+| Concern             | Choice                                                                     |
+| ------------------- | -------------------------------------------------------------------------- |
+| Runtime / framework | Node.js, Express 4, TypeScript 5 (`NodeNext` modules)                      |
+| Database            | PostgreSQL (Neon) via `pg` connection pool, raw parameterised SQL          |
+| Auth                | Passport.js (`passport-google-oauth20`), JSON Web Tokens, HTTP-only cookie |
+| Email               | Resend                                                                     |
+| File storage        | Vercel Blob (public store)                                                 |
+| Uploads             | Multer (in-memory, 1 MB limit, PDF only)                                   |
+| Tooling             | `tsx` for dev, ESLint 9 + `simple-import-sort`, GitHub Actions             |
 
 ---
 
@@ -41,7 +41,7 @@ backend/src
 ├── app.ts                  Express app: CORS, JSON, cookies, Passport, routes
 ├── server.ts               Starts the HTTP listener (local / long-running hosts)
 ├── config/
-│   ├── db.ts               pg Pool (SSL enabled in production)
+│   ├── db.ts               pg Pool (SSL in production) + withTransaction / per-user lock helpers
 │   └── passport.ts         Google OAuth strategy + find-or-create user
 ├── middleware/
 │   └── authMiddleware.ts   isAuthenticated: cookie → JWT → user row → req.user
@@ -61,10 +61,13 @@ backend/src
 │   └── user.types.ts
 └── utils/                  Small, mostly pure helpers
     ├── email.ts            Sends the OTP email through Resend
-    ├── jwt.ts              signToken / verifyToken (24h expiry)
-    ├── otp.ts              6-digit code from crypto.randomInt
-    ├── parseId.ts          Safe numeric route-param parsing
-    └── validateApplication.ts   Payload validation for create / update
+    ├── jwt.ts              Session token (24h) and OAuth exchange token (60s)
+    ├── otp.ts              6-digit code, OTP limits, constant-time compare
+    ├── parseBoolean.ts     "true" / true -> boolean (multipart vs JSON bodies)
+    ├── parseId.ts          Strict positive-integer route-param parsing
+    ├── pdf.ts              %PDF- check, file-name sanitising, blob path builder
+    ├── validateApplication.ts   Payload validation for create / update
+    └── validateEmail.ts    Trims, lower-cases and validates emails
 ```
 
 The layering is intentionally simple:
@@ -128,12 +131,14 @@ sequenceDiagram
 
 The extra **exchange** step exists because browsers and Vercel can drop cookies that are set on a cross-site redirect. Instead of setting the cookie during the redirect, the backend redirects with a short-lived token, and the SPA swaps it for the real cookie in a direct API response.
 
+The token in the redirect URL is **not** a session token: it is valid for 60 seconds, carries a `purpose` claim and is accepted only by `/api/auth/exchange`. Session tokens are rejected there, and the exchange token is rejected as a cookie.
+
 If a Google account's email already exists (for example the user first signed in with an email code), the existing row is reused rather than duplicated.
 
 ### Email one-time password (OTP)
 
-1. `POST /api/auth/email/send-code` — generates a 6-digit code with `crypto.randomInt`, deletes any earlier codes for that email, stores the new one with a **10-minute** expiry and emails it through Resend.
-2. `POST /api/auth/email/verify-code` — accepts the code only if `email` and `code` match and `expires_at > NOW()`. The code is deleted on success. The user is found or created (display name defaults to the part of the email before `@`), `email_verified` is set, and the cookie is issued.
+1. `POST /api/auth/email/send-code` — the email is trimmed, lower-cased and validated. A 6-digit code is generated with `crypto.randomInt` and stored with a **10-minute** expiry (one active code per email), then emailed through Resend. Requesting another code within **60 seconds** returns `429` with a `Retry-After` header. If the email fails to send, the slot is freed so the user can retry immediately.
+2. `POST /api/auth/email/verify-code` — each guess consumes one of **5 attempts** in a single atomic `UPDATE` before the code is compared (in constant time), so parallel requests cannot get extra guesses. After 5 wrong guesses, or after expiry, the code is dead and a new one must be requested. On success the code is deleted, the user is found (case-insensitively) or created (display name defaults to the part of the email before `@`), `email_verified` is set, and the cookie is issued.
 
 ---
 
@@ -143,31 +148,31 @@ All endpoints return JSON. Errors have the shape `{ "error": "message" }`. Endpo
 
 ### Health
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | Plain-text liveness message |
-| GET | `/health` | `{ status: "ok", timestamp }` |
+| Method | Path      | Description                   |
+| ------ | --------- | ----------------------------- |
+| GET    | `/`       | Plain-text liveness message   |
+| GET    | `/health` | `{ status: "ok", timestamp }` |
 
 ### Auth — `/api/auth`
 
-| Method | Path | Body / query | Description |
-| --- | --- | --- | --- |
-| GET | `/google` | — | Starts the Google OAuth redirect |
-| GET | `/google/secrets` | — | OAuth callback; redirects to the SPA with a short-lived token |
-| GET | `/exchange` | `?code=TOKEN` | Swaps the token for the auth cookie |
-| POST | `/email/send-code` | `{ email }` | Emails a 6-digit code (valid 10 min) |
-| POST | `/email/verify-code` | `{ email, code }` | Verifies the code and sets the cookie |
-| GET  | `/me` | — | Returns `{ user: { id, email, name } }` |
-| POST | `/logout` | — | Clears the cookie |
+| Method | Path                 | Body / query      | Description                                                   |
+| ------ | -------------------- | ----------------- | ------------------------------------------------------------- |
+| GET    | `/google`            | —                 | Starts the Google OAuth redirect                              |
+| GET    | `/google/secrets`    | —                 | OAuth callback; redirects to the SPA with a short-lived token |
+| GET    | `/exchange`          | `?code=TOKEN`     | Swaps the token for the auth cookie                           |
+| POST   | `/email/send-code`   | `{ email }`       | Emails a 6-digit code (valid 10 min)                          |
+| POST   | `/email/verify-code` | `{ email, code }` | Verifies the code and sets the cookie                         |
+| GET    | `/me`                | —                 | Returns `{ user: { id, email, name } }`                       |
+| POST   | `/logout`            | —                 | Clears the cookie                                             |
 
-### Applications — `/api/applications` 
+### Applications — `/api/applications`
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | All of the user's applications, newest `date_applied` first → `{ applications }` |
-| POST | `/` | Create. `201 { application }`. `400` on validation failure or when the limit is reached |
-| PUT | `/:id` | Partial update → `{ application }`. `404` if not found / not yours |
-| DELETE | `/:id` | Delete → `{ message }`. `404` if not found / not yours |
+| Method | Path   | Description                                                                             |
+| ------ | ------ | --------------------------------------------------------------------------------------- |
+| GET    | `/`    | All of the user's applications, newest `date_applied` first → `{ applications }`        |
+| POST   | `/`    | Create. `201 { application }`. `400` on validation failure or when the limit is reached |
+| PUT    | `/:id` | Partial update → `{ application }`. `404` if not found / not yours                      |
+| DELETE | `/:id` | Delete → `{ message }`. `404` if not found / not yours                                  |
 
 Create body:
 
@@ -186,14 +191,14 @@ Create body:
 
 `company_name`, `job_title`, `status` and `date_applied` are required; everything else is optional.
 
-### CVs — `/api/cvs` 
+### CVs — `/api/cvs`
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | The user's CVs, default first → `{ cvs }` |
-| POST | `/` | `multipart/form-data`: `file` (PDF), `name`, optional `version_label`, `notes`, `is_default`. `201 { cv }` |
-| PUT | `/:id` | Update metadata only (`name`, `version_label`, `notes`, `is_default`); the file is not replaced |
-| DELETE | `/:id` | Deletes the row **and** the blob in storage |
+| Method | Path   | Description                                                                                                |
+| ------ | ------ | ---------------------------------------------------------------------------------------------------------- |
+| GET    | `/`    | The user's CVs, default first → `{ cvs }`                                                                  |
+| POST   | `/`    | `multipart/form-data`: `file` (PDF), `name`, optional `version_label`, `notes`, `is_default`. `201 { cv }` |
+| PUT    | `/:id` | Update metadata only (`name`, `version_label`, `notes`, `is_default`); the file is not replaced            |
+| DELETE | `/:id` | Deletes the row **and** the blob in storage                                                                |
 
 ---
 
@@ -202,34 +207,27 @@ Create body:
 **Applications**
 
 - Status is one of: `Applied`, `Interview`, `Technical Test`, `Offer`, `Accepted`, `Rejected`, `Ghosted`, `Withdrawn`.
-- Maximum **20** applications per user (`MAX_APPLICATIONS`).
+- Maximum **20** applications per user (`MAX_APPLICATIONS`), enforced inside a transaction under a per-user lock so parallel requests cannot exceed it.
 - Notes are capped at **500** characters.
 - `follow_up_date` must be a real calendar date in `YYYY-MM-DD` form (so `2026-02-30` is rejected).
-- Updates distinguish *omitted* from *explicitly null*: required columns use `COALESCE`, while nullable ones (`job_link`, `linkedin_link`, `notes`, `follow_up_date`) use a presence flag, so a client can clear a value by sending `null` without wiping fields it did not mention.
+- Updates distinguish _omitted_ from _explicitly null_: required columns use `COALESCE`, while nullable ones (`job_link`, `linkedin_link`, `notes`, `follow_up_date`) use a presence flag, so a client can clear a value by sending `null` without wiping fields it did not mention.
 
 **CVs**
 
-- Maximum **2** CVs per user.
-- PDF only, **1 MB** maximum, held in memory and uploaded to Vercel Blob under `cvs/<userId>/<timestamp>-<originalName>`.
+- Maximum **2** CVs per user (`MAX_CVS`), enforced the same atomic way.
+- PDF only, **1 MB** maximum. The file's `%PDF-` header is checked, not just the mimetype. Rejected uploads return a `400` with a clear message.
+- Held in memory and uploaded to Vercel Blob at `cvs/<random uuid>/<sanitised-name>.pdf`, so the URL is unguessable and exposes neither the user id nor the raw file name. If the database then rejects the CV, the uploaded file is deleted.
 - At most one CV is the default; marking one as default clears the flag on the others.
+- Updating a CV first confirms it belongs to the user; only then are other CVs un-defaulted.
 - Deleting a CV removes the database row first, then the stored file.
 
 ---
 
-## Running locally
-
-```bash
-cd backend
-npm install
-cp .env.example .env   # or create .env from the table above
-npm run dev            # tsx watch on http://localhost:3000
-```
-
-| Script | What it does |
-| --- | --- |
-| `npm run dev` | Runs `src/server.ts` with hot reload |
-| `npm run build` | Type-checks and compiles to `dist/` |
-| `npm start` | Runs the compiled server (`dist/server.js`) |
+| Script          | What it does                                |
+| --------------- | ------------------------------------------- |
+| `npm run dev`   | Runs `src/server.ts` with hot reload        |
+| `npm run build` | Type-checks and compiles to `dist/`         |
+| `npm start`     | Runs the compiled server (`dist/server.js`) |
 
 The frontend dev server (`http://localhost:5173`) talks to this API directly; make sure `FRONTEND_URL` matches it.
 
@@ -249,9 +247,10 @@ The frontend dev server (`http://localhost:5173`) talks to this API directly; ma
 - Auth cookie is `HttpOnly`, `Secure` in production and scoped with `SameSite`.
 - CORS is restricted to a single configured origin.
 - Every SQL statement is parameterised, and every resource query is scoped by `user_id`.
-- Uploads are restricted by type and size before they reach storage.
+- Uploads are restricted by type (mimetype and file header) and size before they reach storage, and stored under unguessable paths.
+- The email code is limited to 5 guesses and one email per minute per address; the OAuth redirect token lives 60 seconds and cannot be used as a session.
+- CV files are currently stored in a **public** Vercel Blob store, so anyone who has a file's URL can open it. Moving to a private store with an authenticated download route is a planned improvement.
 - Dependencies are audited automatically.
-
 
 ---
 
