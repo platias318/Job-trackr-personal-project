@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   frontend:
-    name: Frontend - Build
+    name: Frontend - Lint, Test, Build
     runs-on: ubuntu-latest
 
     steps:
@@ -30,12 +30,20 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
 
   backend:
-    name: Backend - Build
+    name: Backend - Lint, Test, Build
     runs-on: ubuntu-latest
 
     steps:
@@ -52,6 +60,14 @@ jobs:
       - name: Install backend dependencies
         working-directory: backend
         run: npm ci
+
+      - name: Lint backend
+        working-directory: backend
+        run: npm run lint
+
+      - name: Test backend
+        working-directory: backend
+        run: npm test
 
       - name: Build backend
         working-directory: backend
